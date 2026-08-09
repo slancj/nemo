@@ -132,12 +132,12 @@ def serialize_state(game_state) -> str:
     hand = getattr(game_state, "hand", None) or []
     monsters = getattr(game_state, "monsters", None) or []
     hand_lines = [
-        f"{i + 1}. {c.name} (cost {c.cost}, playable={c.is_playable}, target={c.has_target})"
+        f"{i}. {c.name} (cost {c.cost}, playable={c.is_playable}, target={c.has_target})"
         for i, c in enumerate(hand)
     ]
     monster_lines = [
-        f"{i + 1}. {m.name} hp={m.current_hp}/{m.max_hp} intent={m.intent}"
-        for i, m in enumerate(monsters)
+        f"{m.monster_index}. {m.name} hp={m.current_hp}/{m.max_hp} intent={m.intent}"
+        for m in monsters
         if m is not None and m.current_hp > 0
     ]
     return f"""Screen: {screen}
@@ -159,11 +159,11 @@ class TakeAction(BaseModel):
     )
     card_index: int | None = Field(
         default=None,
-        description="1-based index of the card to play from the hand. Only set when command is 'play'.",
+        description="0-based index of the card to play from the hand. Only set when command is 'play'.",
     )
     target_index: int | None = Field(
         default=None,
-        description="Monster index to target with the card. Only set when command is 'play' and the card is an attack or otherwise needs a target.",
+        description="0-based monster index to target with the card. Only set when command is 'play' and the card is an attack or otherwise needs a target.",
     )
     option_index: int | None = Field(
         default=None,
@@ -172,21 +172,40 @@ class TakeAction(BaseModel):
 
 
 def build_action(spec: TakeAction, game_state) -> Any:
-    """Map a TakeAction spec onto a spirecomm action."""
+    """Map a TakeAction spec onto a spirecomm action. Indices are all 0-based."""
     if game_state is None:
         return ProceedAction()
     if spec.command == "play":
         hand = getattr(game_state, "hand", None) or []
-        if spec.card_index is None or not (1 <= spec.card_index <= len(hand)):
+        player = getattr(game_state, "player", None)
+        energy = getattr(player, "energy", 0) if player is not None else 0
+
+        def playable(i: int) -> bool:
+            return (
+                0 <= i < len(hand)
+                and getattr(hand[i], "is_playable", True)
+                and getattr(hand[i], "cost", 0) <= energy
+            )
+
+        idx = spec.card_index if spec.card_index is not None and playable(spec.card_index) else None
+        if idx is None:
+            idx = next((j for j in range(len(hand)) if playable(j)), None)
+        if idx is None:
             return ProceedAction()
-        target = None
+        card = hand[idx]
         monsters = getattr(game_state, "monsters", None) or []
+        target = None
         if spec.target_index is not None:
             for m in monsters:
                 if m is not None and m.current_hp > 0 and m.monster_index == spec.target_index:
                     target = m
                     break
-        return PlayCardAction(card_index=spec.card_index - 1, target_monster=target)
+        if target is None and getattr(card, "has_target", False):
+            for m in monsters:
+                if m is not None and m.current_hp > 0:
+                    target = m
+                    break
+        return PlayCardAction(card_index=idx, target_monster=target)
     if spec.command == "end":
         return EndTurnAction()
     if spec.command == "proceed":
@@ -210,7 +229,7 @@ def make_sts_tools(context: GameContext):
 
     @tool(args_schema=TakeAction)
     def take_action(command, card_index=None, target_index=None, option_index=None) -> str:
-        """Record the single next action to take in Slay the Spire. Hand indices are 1-based; monster and option indices are 0-based. Only set the fields relevant to your command."""
+        """Record the single next action to take in Slay the Spire. Hand, monster, and option indices are all 0-based and match the numbers shown in the game state. Only set the fields relevant to your command."""
         if context.game_state is None:
             return "No game state available; no action taken."
         if context.action is not None:

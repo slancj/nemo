@@ -87,11 +87,28 @@ def build_player_agent(model: BaseChatModel, context: GameContext):
         [take_action_tool],
         "You are an expert Slay the Spire player driving this entire game. The "
         "current game state is fetched for you automatically at the start of every "
-        "turn. Each turn, call take_action exactly once with the single best action. "
-        "On reward/event screens choose a valuable option with 'choose' (skip is "
-        "allowed but usually worse). In combat, play cards and end the turn. Never "
-        "act a second time in a turn, never explain or show any thinking. Act "
-        "immediately.",
+        "turn. Call take_action exactly once per turn, then stop. All indices are "
+        "0-based and match the numbers shown in the game state.\n\n"
+        "Deciding what to do:\n"
+        "- COMBAT: play the best card. Attacks hit the target_index enemy; prefer "
+        "the lowest-HP monster. Play blocks/defense if you are about to take heavy "
+        "damage. End the turn ONLY when no useful card is playable (no energy or "
+        "nothing good left). Never end the turn while you still have playable cards "
+        "and energy.\n"
+        "- CARD_REWARD / COMBAT_REWARD / BOSS_REWARD / EVENT / REST / SHOP: ALWAYS "
+        "take the best reward or choice with command='choose' and option_index = the "
+        "number shown. Only 'proceed' to skip when every option is bad. Taking "
+        "rewards is usually correct and skipping them is usually a mistake.\n"
+        "- MAP: move forward by choosing a node with command='choose'.\n"
+        "- Use 'proceed' to advance past non-choice screens.\n\n"
+        "Examples:\n"
+        "State shows '0. Strike ... playable=True' and '0. Cultist hp=20' -> "
+        "take_action(command='play', card_index=0, target_index=0)\n"
+        "State shows 'Card reward: 0. Iron Wave' -> "
+        "take_action(command='choose', option_index=0)\n"
+        "No useful card left -> take_action(command='end')\n\n"
+        "Never act a second time in a turn, never explain, never show any thinking. "
+        "Act immediately.",
         is_terminal=lambda: context.action is not None,
         observe=observe,
     )
