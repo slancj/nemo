@@ -10,6 +10,11 @@ from rich import print
 from nemo.agents import build_leader_agent, build_player_agent, get_llm
 from nemo.tools import GameContext
 
+_llm = get_llm()
+_context = GameContext()
+_player = build_player_agent(_llm, _context)
+_leader = build_leader_agent(_llm, _player, _context)
+
 
 class NemoState(TypedDict):
     message: NotRequired[str]
@@ -17,11 +22,15 @@ class NemoState(TypedDict):
 
 
 def leader_node(state: NemoState) -> NemoState:
-    llm = get_llm()
-    context = GameContext()
-    leader = build_leader_agent(llm, build_player_agent(llm, context), context)
-    reply = leader.invoke({"messages": [("user", state["message"])]})
-    return {"response": str(reply["messages"][-1].content)}
+    _leader.invoke(
+        {"messages": [("user", state["message"])]},
+        config={"recursion_limit": 4},
+    )
+    _player.invoke(
+        {"messages": _context.messages},
+        config={"recursion_limit": 6},
+    )
+    return {"response": f"action: {_context.action.command if _context.action else None}"}
 
 
 def build_graph() -> StateGraph:

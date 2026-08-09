@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage
 from spirecomm.ai.agent import SimpleAgent
 from spirecomm.communication.action import EndTurnAction, ProceedAction
 from spirecomm.communication.coordinator import Coordinator
@@ -13,6 +14,9 @@ from nemo.agents import build_leader_agent, build_player_agent, get_llm
 from nemo.tools import GameContext
 
 LOG_FILE = Path(__file__).resolve().parents[2] / "nemo_sts.log"
+
+# Keep the player's session history bounded so input tokens stay manageable.
+MAX_SESSION_MESSAGES = 20
 
 logger = logging.getLogger("nemo.sts")
 
@@ -29,29 +33,43 @@ def setup_logging() -> None:
 
 
 class NemoSpireAgent(SimpleAgent):
-    """An agent that uses a leader -> player (ReAct) stack with STS tools to decide each action."""
+    """An agent that plays the game: the leader hands the whole game to the player agent."""
 
     def __init__(self, chosen_class=PlayerClass.IRONCLAD):
         super().__init__(chosen_class)
         llm = get_llm()
         self.context = GameContext()
-        self.leader = build_leader_agent(
-            llm, build_player_agent(llm, self.context), self.context
-        )
+        self.player = build_player_agent(llm, self.context)
+        self.leader = build_leader_agent(llm, self.player, self.context)
 
     def get_next_action_in_game(self, game_state):
-        """Called whenever a new game state arrives. Run the leader -> player agents."""
+        """Called whenever a new game state arrives."""
         if not game_state.play_available and not game_state.proceed_available:
             if game_state.end_available:
                 return EndTurnAction()
             return super().get_next_action_in_game(game_state)
+        self.context.game_state = game_state
+        self.context.action = None
+        self.context.turn += 1
         try:
-            self.context.game_state = game_state
-            self.context.action = None
-            self.leader.invoke(
-                {"messages": [("user", "Decide the best action for the current Slay the Spire state.")]},
+            if not self.context.delegated:
+                self.leader.invoke(
+                    {"messages": [("user", "Take over this entire game and hand it to the player agent.")]},
+                    config={"recursion_limit": 4},
+                )
+                logger.info("Leader delegated the entire game to the player agent")
+            self.context.messages.append(
+                HumanMessage(
+                    content=f"Turn {self.context.turn}: the game state just changed. "
+                    "Record exactly one action."
+                )
+            )
+            self.context.messages = self.context.messages[-MAX_SESSION_MESSAGES:]
+            result = self.player.invoke(
+                {"messages": self.context.messages},
                 config={"recursion_limit": 6},
             )
+            self.context.messages = result["messages"][-MAX_SESSION_MESSAGES:]
             if self.context.action is not None:
                 logger.info("LLM action: %s", self.context.action)
                 return self.context.action

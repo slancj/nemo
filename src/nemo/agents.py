@@ -4,7 +4,7 @@ import logging
 import os
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -27,20 +27,27 @@ def _build_react_graph(
     tools: list,
     system_prompt: str,
     is_terminal,
+    observe=None,
 ):
     """A ReAct-style loop that always stops right after a terminal tool runs.
 
-    The proxy model never terminates an open-ended ReAct loop on its own, so we
-    route END immediately once `is_terminal()` becomes true instead of asking the
-    model to produce a final text answer.
+    `observe` (optional) is called before every model invocation and prepends the
+    result, so the game state is refreshed automatically each turn without an
+    extra LLM round trip. `is_terminal()` is checked after every tool batch so we
+    END immediately once the action is recorded instead of asking the proxy model
+    to produce a final text answer (it never terminates an open-ended loop itself).
     """
     tool_node = ToolNode(tools)
     model_with_tools = model.bind_tools(tools)
 
     def agent(state: MessagesState) -> dict:
-        response = model_with_tools.invoke(
-            [SystemMessage(content=system_prompt), *state["messages"]]
-        )
+        observation = f"Current game state:\n{observe()}" if observe is not None else None
+        messages = [
+            SystemMessage(content=system_prompt),
+            *([HumanMessage(content=observation)] if observation else []),
+            *state["messages"],
+        ]
+        response = model_with_tools.invoke(messages)
         if isinstance(response, AIMessage) and response.tool_calls:
             response = AIMessage(
                 content="",
@@ -70,40 +77,42 @@ def _build_react_graph(
 
 def build_player_agent(model: BaseChatModel, context: GameContext):
     """Tier-2 ReAct agent that plays Slay the Spire using the STS tools."""
+    get_state_tool, take_action_tool = make_sts_tools(context)
+
+    def observe() -> str:
+        return get_state_tool.invoke({})
+
     return _build_react_graph(
         model,
-        make_sts_tools(context),
-        "You are an expert Slay the Spire player. Follow this exact procedure:\n"
-        "1. Call get_game_state to see the current state.\n"
-        "2. Call take_action with exactly ONE action.\n"
-        "Do not analyze, explain, justify, or show any thinking. "
-        "Do not write any text before or after your tool calls. Act immediately.",
+        [take_action_tool],
+        "You are an expert Slay the Spire player driving this entire game. The "
+        "current game state is fetched for you automatically at the start of every "
+        "turn. Each turn, call take_action exactly once with the single best action. "
+        "On reward/event screens choose a valuable option with 'choose' (skip is "
+        "allowed but usually worse). In combat, play cards and end the turn. Never "
+        "act a second time in a turn, never explain or show any thinking. Act "
+        "immediately.",
         is_terminal=lambda: context.action is not None,
+        observe=observe,
     )
 
 
 def build_leader_agent(model: BaseChatModel, player_agent, context: GameContext):
-    """Tier-1 manager agent that delegates decisions to the player agent."""
+    """Tier-1 manager agent that hands the entire game to the player agent."""
 
     @tool
     def delegate_to_player(instruction: str) -> str:
-        """Delegate deciding the current move to the expert Slay the Spire player agent."""
-        try:
-            player_agent.invoke(
-                {"messages": [("user", instruction)]},
-                config={"recursion_limit": 6},
-            )
-        except Exception:
-            logger.exception("Player agent run did not terminate cleanly")
-        if context.action is not None:
-            return f"Player decided: {context.action.command}."
-        return "Player did not record an action."
+        """Take over the entire game: seed the player agent's session. Called once per game."""
+        context.messages = [HumanMessage(content=instruction)]
+        context.delegated = True
+        return "Player agent is now in control of the entire game."
 
     return _build_react_graph(
         model,
         [delegate_to_player],
         "You are the leader of the Nemo Slay the Spire team. Your ONLY job is to "
-        "call delegate_to_player with the user's request. Do not analyze the game, do not "
-        "explain, do not show any thinking, do not write any other text. Call the tool and stop.",
-        is_terminal=lambda: context.action is not None,
+        "hand the entire game to the player agent by calling delegate_to_player "
+        "with the user's request. Do not analyze the game, do not explain, do not "
+        "show any thinking, do not write any other text. Call the tool and stop.",
+        is_terminal=lambda: context.delegated,
     )
