@@ -4,8 +4,11 @@ import os
 from typing import NotRequired, TypedDict
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
+from rich import print
+
+from nemo.agents import build_leader_agent, build_player_agent, get_llm
+from nemo.tools import GameContext
 
 
 class NemoState(TypedDict):
@@ -13,33 +16,26 @@ class NemoState(TypedDict):
     response: NotRequired[str]
 
 
-def greet(state: NemoState) -> NemoState:
-    return {"message": f"Welcome to Nemo! ({os.getenv('NEMO_ENV', 'production')})"}
-
-
-def ask_llm(state: NemoState) -> NemoState:
-    llm = ChatOpenAI(
-        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-        base_url=os.getenv("OPENAI_BASE_URL") or None,
-    )
-    reply = llm.invoke(state["message"])
-    return {"response": str(reply.content)}
+def leader_node(state: NemoState) -> NemoState:
+    llm = get_llm()
+    context = GameContext()
+    leader = build_leader_agent(llm, build_player_agent(llm, context), context)
+    reply = leader.invoke({"messages": [("user", state["message"])]})
+    return {"response": str(reply["messages"][-1].content)}
 
 
 def build_graph() -> StateGraph:
     graph = StateGraph(NemoState)
-    graph.add_node("greet", greet)
-    graph.add_node("ask_llm", ask_llm)
-    graph.add_edge(START, "greet")
-    graph.add_edge("greet", "ask_llm")
-    graph.add_edge("ask_llm", END)
+    graph.add_node("leader", leader_node)
+    graph.add_edge(START, "leader")
+    graph.add_edge("leader", END)
     return graph
 
 
 def main() -> None:
     load_dotenv()
     result = build_graph().compile().invoke({"message": "Hello from Nemo!"})
-    print(result["message"])
+    print(f"[bold blue]Nemo[/bold blue] ({os.getenv('NEMO_ENV', 'production')})")
     print(result["response"])
 
 

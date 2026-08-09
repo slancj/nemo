@@ -9,6 +9,8 @@ dependencies = [
     "langchain-openai>=1.4.2",
     "langgraph>=1.2.10",
     "python-dotenv>=1.2.2",
+    "rich>=15.0.0",
+    "spirecomm",
 ]
 
 [project.scripts]
@@ -24,3 +26,6 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.2",
 ]
+
+[tool.uv.sources]
+spirecomm = { git = "https://github.com/ForgottenArbiter/spirecomm.git" }

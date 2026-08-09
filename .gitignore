@@ -1,4 +1,5 @@
 .venv/
+nemo_sts.log
 .env
 .env.*
 !.env.example
