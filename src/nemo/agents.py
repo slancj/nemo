@@ -1,16 +1,20 @@
-"""Nemo agents: a leader (manager) agent and a ReAct player agent with STS tools."""
+"""Nemo agents: a ReAct player agent with STS tools (single-agent, no leader)."""
 
 import logging
 import os
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from nemo.tools import GameContext, make_sts_tools
+from nemo.tools import (
+    MAX_ACTIONS_PER_TURN,
+    TERMINAL_COMMANDS,
+    GameContext,
+    make_sts_tools,
+)
 
 logger = logging.getLogger("nemo.agents")
 
@@ -87,49 +91,30 @@ def build_player_agent(model: BaseChatModel, context: GameContext):
         [take_action_tool],
         "You are an expert Slay the Spire player driving this entire game. The "
         "current game state is fetched for you automatically at the start of every "
-        "turn. Call take_action exactly once per turn, then stop. All indices are "
-        "0-based and match the numbers shown in the game state.\n\n"
-        "Deciding what to do:\n"
-        "- COMBAT: play the best card. Attacks hit the target_index enemy; prefer "
-        "the lowest-HP monster. Play blocks/defense if you are about to take heavy "
-        "damage. End the turn ONLY when no useful card is playable (no energy or "
-        "nothing good left). Never end the turn while you still have playable cards "
-        "and energy.\n"
+        "turn, and is very detailed. All indices are 0-based and match the numbers "
+        "shown in the game state.\n\n"
+        "You may chain multiple actions in one turn: call take_action once per "
+        "action, in order. In combat, play your strongest attacks (target the "
+        "lowest-HP enemy), use block/defense when you are about to take heavy "
+        "damage, then finish with take_action(command='end'). Do not end the turn "
+        "while you still have playable cards and energy.\n\n"
         "- CARD_REWARD / COMBAT_REWARD / BOSS_REWARD / EVENT / REST / SHOP: ALWAYS "
-        "take the best reward or choice with command='choose' and option_index = the "
-        "number shown. Only 'proceed' to skip when every option is bad. Taking "
-        "rewards is usually correct and skipping them is usually a mistake.\n"
-        "- MAP: move forward by choosing a node with command='choose'.\n"
+        "take the best reward with take_action(command='choose', option_index=<the "
+        "number shown>). Skipping rewards is usually a mistake. For a card reward, "
+        "choose the card that best improves your deck.\n"
+        "- MAP: move forward by choosing a reachable node with 'choose'.\n"
         "- Use 'proceed' to advance past non-choice screens.\n\n"
         "Examples:\n"
         "State shows '0. Strike ... playable=True' and '0. Cultist hp=20' -> "
         "take_action(command='play', card_index=0, target_index=0)\n"
-        "State shows 'Card reward: 0. Iron Wave' -> "
+        "State shows 'CARD_REWARD: 0. Iron Wave' -> "
         "take_action(command='choose', option_index=0)\n"
         "No useful card left -> take_action(command='end')\n\n"
-        "Never act a second time in a turn, never explain, never show any thinking. "
-        "Act immediately.",
-        is_terminal=lambda: context.action is not None,
+        "Never explain, never show any thinking. Act immediately and stop once "
+        "your turn's actions are recorded.",
+        is_terminal=lambda: (
+            context.last_command in TERMINAL_COMMANDS
+            or len(context.pending_actions) >= MAX_ACTIONS_PER_TURN
+        ),
         observe=observe,
-    )
-
-
-def build_leader_agent(model: BaseChatModel, player_agent, context: GameContext):
-    """Tier-1 manager agent that hands the entire game to the player agent."""
-
-    @tool
-    def delegate_to_player(instruction: str) -> str:
-        """Take over the entire game: seed the player agent's session. Called once per game."""
-        context.messages = [HumanMessage(content=instruction)]
-        context.delegated = True
-        return "Player agent is now in control of the entire game."
-
-    return _build_react_graph(
-        model,
-        [delegate_to_player],
-        "You are the leader of the Nemo Slay the Spire team. Your ONLY job is to "
-        "hand the entire game to the player agent by calling delegate_to_player "
-        "with the user's request. Do not analyze the game, do not explain, do not "
-        "show any thinking, do not write any other text. Call the tool and stop.",
-        is_terminal=lambda: context.delegated,
     )
